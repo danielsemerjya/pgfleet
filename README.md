@@ -20,12 +20,29 @@ and any AWS region work; you set yours in config.
 | The runtime itself | **Docker Compose** | rendered by Ansible to `/opt/db-server/docker/` |
 | Secrets | **Ansible Vault** | `ansible/group_vars/all/vault.yml` (encrypted) |
 
-```
-Apps (serverless or long-running) ──TLS+mTLS──► db.<your-domain>:6432 ──► PgBouncer ──► Postgres 16
-                                                                                   │ WAL + nightly
-VPS (Ansible-managed, any region) ─────────────────────────────────────────────► S3 (your AWS region)
-                                                                                   ▲ pilot-light DR
-                                                          on failure: `make dr-failover` → EC2 restores
+```mermaid
+flowchart LR
+    apps["Apps<br/>Amplify · Next.js · Lambda<br/>or any client"]
+
+    subgraph vps["VPS · Ubuntu 24.04 · Ansible-managed"]
+        direction LR
+        pgb["PgBouncer<br/>:6432 · transaction pool"]
+        pg["PostgreSQL 16<br/>+ pgvector"]
+        pgb --> pg
+    end
+
+    s3[("AWS S3<br/>encrypted · versioned · PITR")]
+    ec2["Pilot-light DR EC2<br/>restores from S3"]
+
+    apps -->|"TLS + mTLS<br/>db.your-domain:6432"| pgb
+    pg -->|"pgBackRest<br/>WAL + nightly"| s3
+    s3 -.->|"on failure:<br/>make dr-failover"| ec2
+    ec2 -.->|"DNS repoint"| apps
+
+    classDef self fill:#dbeafe,stroke:#2563eb,color:#0f172a;
+    classDef aws fill:#fef3c7,stroke:#d97706,color:#0f172a;
+    class pgb,pg self
+    class s3,ec2 aws
 ```
 
 ## Layout
