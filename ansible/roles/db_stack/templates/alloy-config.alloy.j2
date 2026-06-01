@@ -1,0 +1,19 @@
+// Managed by Ansible (db_stack role). Scrape exporters → Grafana Cloud.
+prometheus.scrape "exporters" {
+  targets = [
+    { "__address__" = "postgres_exporter:9187", job = "postgres", instance = "{{ domain }}" },
+    { "__address__" = "node_exporter:9100",      job = "node",     instance = "{{ domain }}" },
+  ]
+  scrape_interval = "30s"
+  forward_to = [prometheus.remote_write.grafanacloud.receiver]
+}
+
+prometheus.remote_write "grafanacloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROM_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_PROM_API_KEY")
+    }
+  }
+}

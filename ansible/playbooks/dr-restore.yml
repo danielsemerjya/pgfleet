@@ -1,0 +1,21 @@
+# Configure a freshly-provisioned DR EC2 (from dr-oncall.yaml) using the SAME roles as
+# production, then restore the database from S3. Invoked by scripts/dr-failover.sh with the
+# new host passed on the command line, e.g.:
+#   ansible-playbook playbooks/dr-restore.yml -i "<ec2-ip>," -u ubuntu
+---
+- name: db-server DR restore
+  hosts: all
+  become: true
+  vars:
+    is_dr: true
+    dr_restore: true        # db_stack restores from S3 instead of initialising fresh;
+                            # projects role is skipped (data comes from the restore)
+  vars_files:
+    - ../group_vars/all/vars.yml
+    - ../group_vars/all/vault.yml
+  roles:
+    - { role: common,   tags: [common] }
+    - { role: certs,    tags: [certs] }
+    - { role: db_stack, tags: [db] }     # renders config, pgbackrest --delta restore, compose up
+    - { role: backups,  tags: [backups] }
+    - { role: monitoring, tags: [monitoring] }

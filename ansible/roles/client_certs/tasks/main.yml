@@ -1,0 +1,64 @@
+---
+# Issue ONE mTLS client cert for `client_cn` (a Postgres login role), sign it with the
+# project CA, and push {cert, key, connection-info} to Secrets Manager as
+# db-server/<project>/db-client. Runs on the control node (needs the CA private key + your
+# local AWS creds). Called per-project by site.yml and ad-hoc by issue-client-cert.yml.
+# Idempotent: the key/cert aren't regenerated while still valid; only the secret is re-pushed.
+- name: "[{{ client_cn }}] derive project + paths"
+  ansible.builtin.set_fact:
+    _project: "{{ client_cn | regex_replace('_app$', '') }}"
+    _ca_dir: "{{ playbook_dir }}/../files/ca"
+    _out_dir: "{{ playbook_dir }}/../files/clients/{{ client_cn }}"
+
+# check_mode: false on the local cert-gen tasks (dir/key/CSR/sign): control-node-local,
+# idempotent artifacts that the next task reads, so they must materialize even under --check.
+# The Secrets Manager push below is NOT annotated — it stays dry-run-safe (no AWS writes in --check).
+- name: "[{{ client_cn }}] output dir"
+  ansible.builtin.file: { path: "{{ _out_dir }}", state: directory, mode: "0700" }
+  check_mode: false
+
+- name: "[{{ client_cn }}] client key"
+  community.crypto.openssl_privatekey: { path: "{{ _out_dir }}/client.key", size: 2048 }
+  check_mode: false
+
+- name: "[{{ client_cn }}] client CSR (CN must equal the Postgres role)"
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ _out_dir }}/client.key"
+    common_name: "{{ client_cn }}"
+  register: _csr
+  check_mode: false
+
+- name: "[{{ client_cn }}] sign with project CA"
+  community.crypto.x509_certificate:
+    path: "{{ _out_dir }}/client.crt"
+    csr_content: "{{ _csr.csr }}"
+    provider: ownca
+    ownca_path: "{{ _ca_dir }}/client-ca.crt"
+    ownca_privatekey_path: "{{ _ca_dir }}/client-ca.key"
+    ownca_privatekey_passphrase: "{{ vault_ca_passphrase }}"
+    ownca_not_after: "+825d"
+  check_mode: false
+
+# Uses YOUR local AWS creds (the CloudFormation-deploy identity), never the VPS IAM user.
+# The CA private key is NEVER uploaded — only the per-app client bundle. Skip with
+# -e push_to_secrets_manager=false.
+- name: "[{{ client_cn }}] push bundle to Secrets Manager (db-server/{{ _project }}/db-client)"
+  community.aws.secretsmanager_secret:
+    name: "db-server/{{ _project }}/db-client"
+    description: "mTLS client cert/key + DB connection info for role {{ client_cn }} (managed by Ansible)"
+    region: "{{ backup_s3_region }}"
+    state: present
+    overwrite: true
+    secret: "{{ _bundle | to_json }}"
+  vars:
+    _bundle:
+      host: "{{ domain }}"
+      port: 6432
+      dbname: "{{ _project }}"
+      user: "{{ client_cn }}"
+      sslmode: "verify-full"
+      password: "{{ vault_project_passwords[_project] }}"
+      client_cert: "{{ lookup('file', _out_dir + '/client.crt') }}"
+      client_key: "{{ lookup('file', _out_dir + '/client.key') }}"
+  no_log: true
+  when: push_to_secrets_manager | default(true) | bool

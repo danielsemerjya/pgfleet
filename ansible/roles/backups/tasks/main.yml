@@ -1,0 +1,46 @@
+---
+# Run pgBackRest as the 'postgres' OS user (not root, the docker-exec default) so it
+# connects to PG via the local socket as role 'postgres'. stanza-create is idempotent.
+- name: Create/verify pgBackRest stanza
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ app_dir }}/docker/docker-compose.yml exec -T -u postgres postgres pgbackrest --stanza=main stanza-create"
+  changed_when: false
+
+- name: Verify repo/archive config
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ app_dir }}/docker/docker-compose.yml exec -T -u postgres postgres pgbackrest --stanza=main check"
+  changed_when: false
+
+# --- Backup + liveness helper scripts ---
+- name: scripts dir
+  ansible.builtin.file: { path: "{{ app_dir }}/scripts", state: directory, mode: "0755" }
+- name: Render helper scripts
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ app_dir }}/scripts/{{ item }}"
+    mode: "0755"
+  loop: [backup.sh, liveness.sh]
+
+# --- Cron (only on the primary; DR is transient) ---
+- name: Full backup — Sundays 02:10
+  ansible.builtin.cron:
+    name: pgbackrest-full
+    weekday: "0"
+    hour: "2"
+    minute: "10"
+    job: "{{ app_dir }}/scripts/backup.sh full"
+  when: not (is_dr | bool)
+- name: Differential backup — Mon–Sat 02:10
+  ansible.builtin.cron:
+    name: pgbackrest-diff
+    weekday: "1-6"
+    hour: "2"
+    minute: "10"
+    job: "{{ app_dir }}/scripts/backup.sh diff"
+  when: not (is_dr | bool)
+- name: Liveness dead-man's-switch — every minute
+  ansible.builtin.cron:
+    name: db-liveness
+    minute: "*"
+    job: "{{ app_dir }}/scripts/liveness.sh"
+  when: (not (is_dr | bool)) and (healthcheck_liveness_url | length > 0)

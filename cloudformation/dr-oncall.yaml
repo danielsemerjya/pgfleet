@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Pilot-light DR compute — deployed ON DEMAND at failover (~$0 idle). A THIN, bare Ubuntu
+  EC2 + SG + IAM role (S3 read). It does NOT self-configure: Ansible (playbooks/dr-restore.yml)
+  configures it from the same roles as production and restores from S3. Tear down after the
+  primary recovers. See docs/runbook-failover.md.
+
+Parameters:
+  BackupBucket:  { Type: String, Description: pgBackRest S3 bucket (backup-infra output) }
+  Subnet:        { Type: AWS::EC2::Subnet::Id, Description: Public subnet (auto-assign public IP) }
+  VpcId:         { Type: AWS::EC2::VPC::Id }
+  AdminCidr:     { Type: String, Description: Your IP/CIDR allowed to SSH (Ansible control node) }
+  AppCidr:       { Type: String, Default: 0.0.0.0/0, Description: CIDR allowed to reach 6432 (mTLS-protected) }
+  KeyName:       { Type: AWS::EC2::KeyPair::KeyName, Description: SSH key for Ansible }
+  InstanceType:  { Type: String, Default: t3.small }
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: db-server DR
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22,   ToPort: 22,   CidrIp: !Ref AdminCidr, Description: SSH for Ansible }
+        - { IpProtocol: tcp, FromPort: 6432, ToPort: 6432, CidrIp: !Ref AppCidr,   Description: PgBouncer (mTLS) }
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore]
+      Policies:
+        - PolicyName: pgbackrest-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: [s3:ListBucket, s3:GetBucketLocation], Resource: !Sub "arn:aws:s3:::${BackupBucket}" }
+              - { Effect: Allow, Action: [s3:GetObject], Resource: !Sub "arn:aws:s3:::${BackupBucket}/*" }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref Role] }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref Subnet
+      SecurityGroupIds: [!Ref Sg]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 40, VolumeType: gp3, Encrypted: true }
+      Tags: [{ Key: Name, Value: db-dr-oncall }]
+      # Minimal userdata: just ensure python3 is present so Ansible can run. All real
+      # configuration is done by playbooks/dr-restore.yml over SSH.
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          apt-get update -y && apt-get install -y python3
+
+Outputs:
+  InstanceId: { Value: !Ref Instance }
+  PublicIp:   { Value: !GetAtt Instance.PublicIp }
+  SecurityGroupId: { Value: !Ref Sg }

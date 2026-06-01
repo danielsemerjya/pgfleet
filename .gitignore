@@ -1,0 +1,44 @@
+# === Secrets & certs — NEVER commit ===
+# NOTE: keep comments on their OWN lines. An inline "# ..." after a pattern is NOT a
+# comment in .gitignore — git treats it as part of the pattern, silently breaking the rule.
+
+# Ansible: the real (encrypted) vault, the vault password file, the client CA (key + cert),
+# and every issued client cert/key. Regenerate or keep offline — never in git.
+ansible/group_vars/all/vault.yml
+ansible/.vault_pass
+ansible/files/ca/
+ansible/files/clients/
+*.retry
+
+# Local instance config: filled-in copies of the committed *.example.yml templates.
+# Each user keeps their own; only the *.example.yml templates are committed.
+ansible/group_vars/all/vars.yml
+ansible/inventory/hosts.yml
+
+# Private overlay repo: the real secrets/config live here as their OWN git repo and are
+# symlinked into the ansible/ paths above. Never tracked by this (shareable) repo.
+/private/
+# Safety net: the real Makefile config belongs in private/config.mk, never at the repo root.
+/config.mk
+ansible/files/ca
+ansible/files/clients
+
+# Anything rendered/secret on a host (if you ever keep a local copy).
+# NOTE: scope this to host-rendered paths only — a bare "**/certs/" also matches the
+# ansible/roles/certs/ ROLE and silently drops it from git (broke clones). Don't reintroduce it.
+**/secrets/
+**/docker/certs/
+**/.env
+**/.env.local
+**/.env.alloy
+
+# Local-dev output from scripts/dev-env.sh (client cert/key + .env.local per project)
+.dev/
+
+# Build artifacts
+**/node_modules/
+**/*.zip
+
+# OS / editor
+.DS_Store
+*.swp

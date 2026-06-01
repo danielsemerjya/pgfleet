@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  db-server PERSISTENT infrastructure: the pgBackRest S3 bucket and ONE scoped IAM user
+  that is the OVH host's AWS identity — it both pushes backups to S3 AND edits Route 53 for
+  Let's Encrypt DNS-01 cert issuance/renewal. Separate stack from the ephemeral DR compute
+  because these are stateful and must NEVER be deleted accidentally (DeletionPolicy: Retain).
+  Region-agnostic: deploys to whatever you pass with --region (the Makefile uses REGION from
+  private/config.mk). The bucket auto-name embeds ${AWS::Region}.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: ""
+    Description: Leave blank to auto-name as <account>-pg-backups-<region>.
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route 53 hosted zone ID for your domain (for the DNS-01 cert permission).
+  PrimaryIp:
+    Type: String
+    Description: Public IPv4 of your primary VPS — the steady-state target for the db record.
+  RecordName:
+    Type: String
+    Description: FQDN your apps connect to, e.g. db.example.com (the PgBouncer endpoint).
+
+Conditions:
+  AutoName: !Equals [!Ref BucketName, ""]
+
+Resources:
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If [AutoName, !Sub "${AWS::AccountId}-pg-backups-${AWS::Region}", !Ref BucketName]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: { Status: Enabled }
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-mpu
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 }
+          - Id: expire-noncurrent
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+
+  # The OVH host's single AWS identity: pgBackRest S3 push + Route 53 DNS-01 for certs.
+  # (The DR EC2 uses its own ROLE in dr-oncall.yaml — S3 read only — not this user.)
+  OvhHostUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: db-server-ovh
+      Policies:
+        - PolicyName: pgbackrest-s3-rw
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: [s3:ListBucket, s3:GetBucketLocation], Resource: !GetAtt BackupBucket.Arn }
+              - { Effect: Allow, Action: [s3:GetObject, s3:PutObject, s3:DeleteObject], Resource: !Sub "${BackupBucket.Arn}/*" }
+        - PolicyName: certbot-dns-route53
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ListHostedZones/GetChange don't support resource scoping → must be "*".
+              - { Effect: Allow, Action: [route53:ListHostedZones, route53:GetChange], Resource: "*" }
+              # Record edits scoped to the one zone (the _acme-challenge TXT lives here).
+              - { Effect: Allow, Action: route53:ChangeResourceRecordSets, Resource: !Sub "arn:aws:route53:::hostedzone/${HostedZoneId}" }
+
+  OvhHostAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties: { UserName: !Ref OvhHostUser }
+
+  # Stash the key/secret in Secrets Manager rather than exposing the secret in stack outputs.
+  OvhHostCreds:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: db-server/ovh-aws-creds
+      Description: AWS credentials for the OVH host to access S3 backups and Route 53 for certs.
+      SecretString: !Sub '{"AWS_ACCESS_KEY_ID":"${OvhHostAccessKey}","AWS_SECRET_ACCESS_KEY":"${OvhHostAccessKey.SecretAccessKey}"}'
+
+  # Steady-state DNS: db.<domain> -> OVH VPS. TTL 60 so a DR cutover propagates within ~1 min.
+  # During a disaster, scripts/dr-failover.sh UPSERTs this record to the EC2 IP out-of-band
+  # (CloudFormation will then report drift — that is expected and harmless during DR).
+  # Fail-back = redeploy THIS stack, which resets the record to PrimaryIp.
+  DbDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref RecordName
+      Type: A
+      TTL: "60"
+      ResourceRecords: [!Ref PrimaryIp]
+
+Outputs:
+  BackupBucketName:
+    Value: !Ref BackupBucket
+    Export: { Name: db-server-backup-bucket }
+  OvhHostCredsSecretArn:
+    Description: Secrets Manager ARN with the OVH host's AWS key/secret (S3 backups + Route 53).
+    Value: !Ref OvhHostCreds
+  DbEndpoint:
+    Description: DNS name apps connect to (resolves to the OVH primary in steady state).
+    Value: !Ref RecordName

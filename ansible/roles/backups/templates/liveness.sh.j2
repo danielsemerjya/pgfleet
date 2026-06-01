@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Managed by Ansible (backups role). Dead-man's-switch: ping HC only when the DB answers.
+# If pings stop, Healthchecks.io emails you (with your runbook link). Runs every minute.
+set -euo pipefail
+HC="{{ healthcheck_liveness_url }}"
+COMPOSE="docker compose -f {{ app_dir }}/docker/docker-compose.yml"
+
+if $COMPOSE exec -T postgres pg_isready -U postgres -q \
+   && $COMPOSE exec -T postgres psql -U postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
+  curl -fsS -m 10 "$HC" >/dev/null || true
+else
+  curl -fsS -m 10 "${HC}/fail" >/dev/null || true
+fi

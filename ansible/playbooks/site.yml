@@ -1,0 +1,37 @@
+# Full configuration of the PRIMARY (and re-usable for DR). Idempotent — run anytime.
+#   ansible-playbook playbooks/site.yml
+# Run one phase:  ansible-playbook playbooks/site.yml --tags backups
+---
+- name: db-server
+  hosts: primary
+  become: true
+  vars_files:
+    - ../group_vars/all/vars.yml
+    - ../group_vars/all/vault.yml
+  roles:
+    - { role: common,     tags: [common, base] }
+    - { role: certs,      tags: [certs, tls] }
+    - { role: db_stack,   tags: [db, postgres, pgbouncer] }
+    - { role: projects,   tags: [projects] }
+    - { role: backups,    tags: [backups] }
+    - { role: monitoring, tags: [monitoring] }
+
+# Per-project mTLS client certs. Separate play because this runs on the CONTROL NODE (it needs
+# the CA private key + your local AWS creds), not on the VPS. One cert per project, signed by
+# the CA created in the play above, pushed to Secrets Manager. Skip with --skip-tags client-certs.
+- name: client-certs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false          # control-node, user-space file ops + AWS API — never sudo
+  vars_files:
+    - ../group_vars/all/vars.yml
+    - ../group_vars/all/vault.yml
+  tags: [client-certs, certs]
+  tasks:
+    - name: Issue + upload a client cert for each project's app role
+      ansible.builtin.include_role: { name: client_certs }
+      loop: "{{ projects }}"
+      loop_control: { loop_var: _proj, label: "{{ _proj.name }}_app" }
+      vars:
+        client_cn: "{{ _proj.name }}_app"

@@ -1,0 +1,35 @@
+---
+# Declarative: every entry in `projects` gets a DB + login role. Skipped on DR (data
+# comes from the restore). PgBouncer [databases] + userlist are templated by db_stack.
+- name: Create project databases + roles
+  ansible.builtin.shell:
+    cmd: |
+      docker compose -f {{ app_dir }}/docker/docker-compose.yml exec -T postgres \
+      psql -U postgres -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{{ item.name }}_app') THEN
+          CREATE ROLE {{ item.name }}_app LOGIN PASSWORD '{{ vault_project_passwords[item.name] }}';
+        ELSE
+          ALTER ROLE {{ item.name }}_app PASSWORD '{{ vault_project_passwords[item.name] }}';
+        END IF;
+      END $$;
+      SELECT 'CREATE DATABASE {{ item.name }} OWNER {{ item.name }}_app'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='{{ item.name }}')\gexec
+      REVOKE CONNECT ON DATABASE {{ item.name }} FROM PUBLIC;
+      GRANT  CONNECT ON DATABASE {{ item.name }} TO {{ item.name }}_app;
+      SQL
+  loop: "{{ projects }}"
+  loop_control: { label: "{{ item.name }}" }
+  when: not (dr_restore | bool)
+  no_log: true
+  changed_when: true
+
+- name: Enable pgvector where requested
+  ansible.builtin.command:
+    cmd: >
+      docker compose -f {{ app_dir }}/docker/docker-compose.yml exec -T postgres
+      psql -U postgres -d {{ item.name }} -c "CREATE EXTENSION IF NOT EXISTS vector;"
+  loop: "{{ projects | selectattr('pgvector', 'defined') | selectattr('pgvector') | list }}"
+  loop_control: { label: "{{ item.name }}" }
+  when: not (dr_restore | bool)
+  changed_when: true

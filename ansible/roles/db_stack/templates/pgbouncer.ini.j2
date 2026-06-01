@@ -1,0 +1,38 @@
+; Managed by Ansible (db_stack role). [databases] generated from the `projects` var.
+; Optional per-project `pool_size` (server conns = "cooks") overrides default_pool_size below.
+; The db_stack pre-flight assert keeps the SUM of pool sizes under Postgres max_connections.
+[databases]
+{% for p in projects %}
+{{ p.name }}         = host=postgres port=5432 dbname={{ p.name }}{{ ' pool_size=' ~ p.pool_size if p.pool_size is defined else '' }}
+{{ p.name }}_session = host=postgres port=5432 dbname={{ p.name }} pool_mode=session
+{% endfor %}
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+stats_users = pgbouncer_stats
+
+pool_mode = {{ pgb_pool_mode }}
+max_prepared_statements = {{ pgb_max_prepared_statements }}
+max_client_conn = {{ pgb_max_client_conn }}
+default_pool_size = {{ pgb_default_pool_size }}
+min_pool_size = {{ pgb_min_pool_size }}
+reserve_pool_size = {{ pgb_reserve_pool_size }}
+reserve_pool_timeout = 3
+
+server_idle_timeout = 600
+server_lifetime = 3600
+query_wait_timeout = 120
+
+; Client TLS + mTLS (verify-full requires a client cert signed by our CA)
+client_tls_sslmode   = verify-full
+client_tls_ca_file   = /etc/pgbouncer/ca/client-ca.crt
+client_tls_cert_file = /etc/pgbouncer/certs/server.crt
+client_tls_key_file  = /etc/pgbouncer/certs/server.key
+client_tls_protocols = secure
+
+; PgBouncer -> Postgres over the internal docker network (localhost) — no TLS needed
+server_tls_sslmode = disable

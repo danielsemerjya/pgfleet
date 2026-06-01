@@ -1,0 +1,27 @@
+# Copy to vault.yml, fill real values, then encrypt:
+#   cp vault.example.yml vault.yml && ansible-vault encrypt vault.yml
+# Edit later with:  ansible-vault edit vault.yml
+# The real vault.yml is gitignored. Keep these out of plaintext anywhere else.
+---
+vault_postgres_superpass: "CHANGE-ME"
+vault_exporter_password: "CHANGE-ME"
+vault_pgb_stats_password: "CHANGE-ME"
+
+# The OVH host's AWS identity (one key pair, from the backup-infra Secrets Manager output:
+# db-server/ovh-aws-creds). Used for BOTH pgBackRest→S3 AND certbot DNS-01 on Route 53.
+vault_ovh_aws_access_key: "CHANGE-ME"
+vault_ovh_aws_secret_key: "CHANGE-ME"
+
+# pgBackRest repo encryption passphrase (losing this = losing backups)
+vault_backup_cipher_pass: "CHANGE-ME-long-random-passphrase"
+
+# Client-cert CA passphrase
+vault_ca_passphrase: "CHANGE-ME"
+
+# Grafana Cloud Prometheus remote_write
+vault_grafana_prom_user: "CHANGE-ME"
+vault_grafana_prom_api_key: "CHANGE-ME"
+
+# Per-project app role passwords (key must match projects[].name in vars.yml)
+vault_project_passwords:
+  proj_a: "CHANGE-ME"

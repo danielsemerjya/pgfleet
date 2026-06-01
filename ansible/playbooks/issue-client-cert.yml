@@ -1,0 +1,20 @@
+# Issue ONE mTLS client cert for an arbitrary CN (an app's Postgres login role), sign it with
+# the project CA, and push it to Secrets Manager as db-server/<project>/db-client.
+# site.yml ALREADY issues one cert per project automatically — use this only for ad-hoc or
+# extra roles (e.g. a second app, or a read-only role) not covered by the projects list.
+#   ansible-playbook playbooks/issue-client-cert.yml -e cn=proj_a_app
+# CN must equal the Postgres role the app logs in as. Output: ansible/files/clients/<cn>/.
+---
+- name: Issue mTLS client cert (ad-hoc)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false          # control-node, user-space file ops + AWS API — never sudo
+  vars_files:
+    - ../group_vars/all/vars.yml
+    - ../group_vars/all/vault.yml
+  tasks:
+    - name: Issue + upload client cert for {{ cn }}
+      ansible.builtin.include_role: { name: client_certs }
+      vars:
+        client_cn: "{{ cn }}"

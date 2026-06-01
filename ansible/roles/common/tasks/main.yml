@@ -1,0 +1,73 @@
+---
+- name: Base packages
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, gnupg, ufw, fail2ban, unattended-upgrades, acl, python3]
+    update_cache: true
+    state: present
+
+# --- Swap (OVH VPS images often ship without it) ---
+- name: Check for swap
+  ansible.builtin.command: swapon --show
+  register: swap_show
+  changed_when: false
+- name: Create 2G swap file
+  when: swap_show.stdout == ""
+  block:
+    - ansible.builtin.command: { cmd: "fallocate -l 2G /swapfile", creates: /swapfile }
+    - ansible.builtin.file: { path: /swapfile, mode: "0600" }
+    - ansible.builtin.command: { cmd: "mkswap /swapfile" }
+    - ansible.builtin.command: { cmd: "swapon /swapfile" }
+    - ansible.posix.mount: { path: none, src: /swapfile, fstype: swap, opts: sw, state: present }
+
+# --- Docker Engine (official apt repo) ---
+- name: Docker GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+- name: Docker apt repo
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_facts['distribution_release'] }}"]
+    components: [stable]
+    signed_by: /etc/apt/keyrings/docker.asc
+  register: docker_repo
+- name: Install Docker Engine + Compose plugin
+  ansible.builtin.apt:
+    name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+    update_cache: "{{ docker_repo is changed }}"
+    state: present
+- name: Docker enabled + running
+  ansible.builtin.systemd_service: { name: docker, enabled: true, state: started }
+- name: Add ansible user to docker group
+  ansible.builtin.user: { name: "{{ ansible_user }}", groups: docker, append: true }
+
+# --- Firewall: SSH + the DB edge only ---
+- name: Allow SSH (before enabling)
+  community.general.ufw: { rule: allow, name: OpenSSH }
+- name: Allow PgBouncer
+  community.general.ufw: { rule: allow, port: "6432", proto: tcp }
+- name: Enable firewall (default deny)
+  community.general.ufw: { state: enabled, policy: deny, direction: incoming }
+
+# --- Brute-force + auto security updates ---
+- name: fail2ban + unattended-upgrades enabled
+  ansible.builtin.systemd_service: { name: "{{ item }}", enabled: true, state: started }
+  loop: [fail2ban, unattended-upgrades]
+
+# --- SSH hardening: key-only auth, no root password login ---
+# PREREQUISITE: your SSH public key must already be installed for ansible_user, or this
+# locks you out. Ubuntu's sshd_config does `Include /etc/ssh/sshd_config.d/*.conf`, so this
+# drop-in overrides the defaults without editing the main file.
+- name: Harden sshd (drop-in)
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-hardening.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (common role).
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+  notify: reload sshd

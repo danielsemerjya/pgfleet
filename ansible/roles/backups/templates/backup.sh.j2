@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Managed by Ansible (backups role). pgBackRest backup + Healthchecks.io ping.
+# Usage: backup.sh full|diff|incr
+set -euo pipefail
+TYPE="${1:-diff}"
+HC="{{ healthcheck_backup_url }}"
+COMPOSE="docker compose -f {{ app_dir }}/docker/docker-compose.yml"
+
+[ -n "$HC" ] && curl -fsS -m 10 "${HC}/start" >/dev/null || true
+if $COMPOSE exec -T -u postgres postgres pgbackrest --stanza=main --type="$TYPE" backup \
+   && $COMPOSE exec -T -u postgres postgres pgbackrest --stanza=main check; then
+  [ -n "$HC" ] && curl -fsS -m 10 "$HC" >/dev/null || true
+else
+  rc=$?
+  [ -n "$HC" ] && curl -fsS -m 10 "${HC}/fail" >/dev/null || true
+  exit $rc
+fi

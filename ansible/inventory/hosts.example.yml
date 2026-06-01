@@ -1,0 +1,15 @@
+# Inventory TEMPLATE. Copy to hosts.yml and set your VPS IP:
+#   cp inventory/hosts.example.yml inventory/hosts.yml
+# The real hosts.yml is gitignored.
+all:
+  children:
+    primary:
+      hosts:
+        primary-vps:
+          ansible_host: CHANGE_ME          # public IPv4 of your VPS
+          ansible_user: ubuntu
+          is_dr: false
+    dr:
+      # Populated at failover time by scripts/dr-failover.sh (passes the fresh EC2 IP on
+      # the command line), so this group is normally empty.
+      hosts: {}

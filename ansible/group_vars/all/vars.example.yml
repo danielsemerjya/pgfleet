@@ -1,0 +1,54 @@
+# Non-secret configuration TEMPLATE. Copy to vars.yml and fill in the <...> placeholders:
+#   cp group_vars/all/vars.example.yml group_vars/all/vars.yml
+# Secrets live in vault.yml (encrypted) — see vault.example.yml. The real vars.yml is gitignored.
+---
+app_dir: /opt/db-server
+domain: db.example.com            # the FQDN your apps connect to (the PgBouncer endpoint)
+aws_region: eu-central-1          # region for S3 backups + Secrets Manager + Route 53 work
+letsencrypt_email: admin@example.com
+is_dr: false
+dr_restore: false                 # set true by playbooks/dr-restore.yml
+
+# --- Postgres tuning (sized for 4 vCPU / 8 GB — adjust to your VPS) ---
+pg_image_base: pgvector/pgvector:0.8.2-pg16   # pinned (passed as PG_IMAGE_BASE build-arg)
+pg_max_connections: 120
+pg_shared_buffers: 2GB
+pg_effective_cache_size: 6GB
+pg_work_mem: 32MB
+pg_maintenance_work_mem: 512MB
+
+# --- PgBouncer ---
+pgb_pool_mode: transaction
+pgb_default_pool_size: 25
+pgb_min_pool_size: 5
+pgb_reserve_pool_size: 10
+pgb_max_client_conn: 2000
+pgb_max_prepared_statements: 200
+
+# --- pgBackRest / S3 (bucket name comes from the backup-infra CFN stack output) ---
+# Different region? Replace eu-central-1 in all three below to match aws_region above
+# (and private/config.mk). Any AWS region works.
+backup_s3_bucket: "<aws-account-id>-pg-backups-eu-central-1"
+backup_s3_endpoint: s3.eu-central-1.amazonaws.com
+backup_s3_region: eu-central-1
+backup_retention_full: 2
+backup_retention_diff: 6
+
+# --- Healthchecks.io ping URLs (create the checks first; leave blank to disable) ---
+healthcheck_backup_url: ""        # pinged by the backup cron
+healthcheck_liveness_url: ""      # 1-min dead-man's-switch
+
+# --- Grafana Cloud (token is in vault) ---
+grafana_prom_url: "https://<your-grafana-stack>.grafana.net/api/prom/push"
+
+# --- Projects (declarative). Adding one = add here + set its password in vault, re-run. ---
+# Optional per-project `pool_size` = how many DB "cooks" (server connections) this app gets.
+# Omit it to use pgb_default_pool_size above. RULE: the SUM of all pool sizes must stay under
+# pg_max_connections − ~15, or the deploy fails loudly. Busy app → more; quiet app → fewer.
+# (More than ~25 rarely helps — CPU cores are the real limit, not pool size. Add cores instead.)
+projects:
+  - name: myapp
+    pgvector: true
+    # pool_size: 25        # optional; defaults to pgb_default_pool_size
+  # - name: sideproj
+  #   pool_size: 5         # a quiet project — just a few cooks

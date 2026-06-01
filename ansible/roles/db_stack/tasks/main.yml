@@ -1,0 +1,121 @@
+---
+# Pre-flight: the sum of per-project pool sizes ("cooks") must fit under Postgres
+# max_connections, leaving ~15 headroom for superuser + exporter + pgBackRest + the occasional
+# migration (session) connection. Catches oversubscription early — e.g. 10 projects × 25 = 250
+# would blow past max_connections (120) and cause "too many clients" at runtime.
+- name: Pre-flight — pooled connections fit Postgres max_connections
+  vars:
+    _pool_total: "{{ projects | map(attribute='pool_size', default=pgb_default_pool_size) | map('int') | sum }}"
+    _budget: "{{ (pg_max_connections | int) - 15 }}"
+  ansible.builtin.assert:
+    that: "(_pool_total | int) <= (_budget | int)"
+    fail_msg: >-
+      PgBouncer pools would reserve {{ _pool_total }} server connections — over the safe budget
+      of {{ _budget }} (max_connections {{ pg_max_connections }} − 15 headroom). Lower
+      pgb_default_pool_size, set a smaller per-project pool_size, or raise pg_max_connections
+      (needs more RAM). See docs/database-architecture.md §2.
+    success_msg: "Connection budget OK — pools reserve {{ _pool_total }}/{{ pg_max_connections }} server conns (budget {{ _budget }})."
+  run_once: true
+
+- name: Stack directories
+  ansible.builtin.file: { path: "{{ app_dir }}/docker/{{ item }}", state: directory, mode: "0755" }
+  loop: [postgres, pgbouncer, pgbackrest, alloy, secrets]
+
+# edoburu/pgbouncer runs as a NON-root user, so its bind-mounted secrets (userlist.txt and
+# server.key, both 0640 root) must be owned by that UID or pgbouncer FATALs at startup
+# ("could not open auth_file" / "failed to load private key file"). Discover the UID from the
+# image instead of hardcoding it, so it survives an image change.
+- name: Discover the PgBouncer image's runtime UID
+  ansible.builtin.command:
+    # Pinned — keep in sync with the pgbouncer image in docker-compose.yml.j2.
+    cmd: "docker run --rm --entrypoint id edoburu/pgbouncer:v1.25.1-p0 -u"
+  register: pgb_uid
+  changed_when: false
+  # Read-only discovery (id -u) that the chown of userlist.txt + server.key depends on. Must
+  # run under --check too, else pgb_uid.stdout is empty and those chowns fail with an empty owner.
+  check_mode: false
+
+- name: Dockerfile
+  ansible.builtin.copy:
+    src: Dockerfile.postgres
+    dest: "{{ app_dir }}/docker/Dockerfile.postgres"
+    mode: "0644"
+  register: dockerfile
+
+- name: Postgres superuser password file (used on first init only)
+  ansible.builtin.copy:
+    content: "{{ vault_postgres_superpass }}"
+    dest: "{{ app_dir }}/docker/secrets/postgres_superpass"
+    mode: "0600"
+
+# owner/group default to root. Two 0640 files are bind-mounted into NON-root containers and
+# so must be owned by that container's UID (mode stays 0640 → secrets non-world-readable):
+#   - pgbackrest.conf → 999:999 (postgres in pgvector/pgvector:pg16; read for stanza ops +
+#     archive_command), holds the S3 keys/cipher pass.
+#   - userlist.txt → the PgBouncer UID discovered above (read at startup for SCRAM auth).
+- name: Render config templates
+  ansible.builtin.template:
+    src: "{{ item.s }}"
+    dest: "{{ app_dir }}/docker/{{ item.d }}"
+    mode: "{{ item.m | default('0644') }}"
+    owner: "{{ item.o | default(omit) }}"
+    group: "{{ item.g | default(omit) }}"
+  loop:
+    - { s: docker-compose.yml.j2,  d: docker-compose.yml }
+    - { s: postgresql.conf.j2,     d: postgres/postgresql.conf, _notify: postgres }
+    - { s: pgbouncer.ini.j2,       d: pgbouncer/pgbouncer.ini }
+    - { s: userlist.txt.j2,        d: pgbouncer/userlist.txt, m: "0640", o: "{{ pgb_uid.stdout }}" }
+    - { s: pgbackrest.conf.j2,     d: pgbackrest/pgbackrest.conf, m: "0640", o: "999", g: "999" }
+    - { s: env.j2,                 d: .env, m: "0640" }
+    - { s: alloy-config.alloy.j2,  d: alloy/config.alloy }
+    - { s: alloy-env.j2,           d: alloy/.env.alloy, m: "0640" }
+  notify: [restart postgres, restart pgbouncer]
+
+# The Let's Encrypt server key (installed 0640 root by the certs role) must also be readable
+# by the PgBouncer user for TLS. Chown to the same UID — mode stays 0640, so the private key
+# is still not world-readable.
+- name: Make the TLS server key readable by PgBouncer
+  ansible.builtin.file:
+    path: "{{ app_dir }}/docker/certs/server/server.key"
+    owner: "{{ pgb_uid.stdout }}"
+    mode: "0640"
+  notify: restart pgbouncer
+
+# Rebuild on first run or whenever Dockerfile.postgres changes (the 'Up' task below uses
+# build: policy and won't rebuild an existing image). 'docker compose up' then recreates
+# the container off the new image; pgdata is a named volume so data survives.
+- name: Build the Postgres image (first run / Dockerfile change)
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ app_dir }}/docker/docker-compose.yml build postgres"
+  when: dockerfile.changed and not (dr_restore | bool)
+  changed_when: true
+
+# --- DR path: restore from S3 BEFORE first start (empty data volume) ---
+- name: (DR) Build the Postgres image
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ app_dir }}/docker/docker-compose.yml build postgres"
+  when: dr_restore | bool
+  changed_when: true
+- name: (DR) Restore database from S3
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ app_dir }}/docker/docker-compose.yml run --rm --no-deps --user postgres postgres pgbackrest --stanza=main --delta restore"
+  when: dr_restore | bool
+  changed_when: true
+
+# --- Bring up core services (fresh init on the primary; post-restore on DR) ---
+- name: Up postgres + pgbouncer
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}/docker"
+    services: [postgres, pgbouncer]
+    build: policy
+    state: present
+  register: compose_up
+
+- name: Wait for Postgres
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ app_dir }}/docker/docker-compose.yml exec -T postgres pg_isready -U postgres"
+  register: ready
+  until: ready.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false

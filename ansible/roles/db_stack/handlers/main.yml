@@ -1,0 +1,12 @@
+---
+- name: restart postgres
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}/docker"
+    services: [postgres]
+    state: restarted
+
+- name: restart pgbouncer
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}/docker"
+    services: [pgbouncer]
+    state: restarted

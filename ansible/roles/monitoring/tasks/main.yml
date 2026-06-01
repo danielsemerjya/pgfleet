@@ -1,0 +1,24 @@
+---
+- name: Create read-only 'exporter' role (pg_monitor)
+  ansible.builtin.shell:
+    cmd: |
+      docker compose -f {{ app_dir }}/docker/docker-compose.yml exec -T postgres \
+      psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='exporter') THEN
+          CREATE ROLE exporter LOGIN PASSWORD '{{ vault_exporter_password }}';
+        ELSE
+          ALTER ROLE exporter PASSWORD '{{ vault_exporter_password }}';
+        END IF;
+      END $$;
+      GRANT pg_monitor TO exporter;
+      SQL
+  no_log: true
+  changed_when: true
+
+- name: Up exporters + Alloy (ships metrics to Grafana Cloud)
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}/docker"
+    services: [postgres_exporter, node_exporter, alloy]
+    state: present
+  when: grafana_prom_url | length > 0

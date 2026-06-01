@@ -1,0 +1,108 @@
+---
+# 1. Client CA — generated ONCE on the control node, reused across primary + DR.
+#    The cert is committable; the key is sensitive (passphrase-protected, vaulted/local).
+#    check_mode: false on the CA-bootstrap tasks below: they are local, idempotent control-node
+#    artifacts that later tasks READ (CSR/sign), so they must materialize even under --check —
+#    otherwise a dry run fails with "no such file". (Remote + Secrets Manager steps still honor --check.)
+- name: CA dir (control node)
+  ansible.builtin.file: { path: "{{ playbook_dir }}/../files/ca", state: directory, mode: "0700" }
+  delegate_to: localhost
+  run_once: true
+  become: false
+  check_mode: false
+# Create the CA EXACTLY once. Gating on file existence (rather than openssl_privatekey's
+# regenerate:, which still rotates a passphrase-protected key here) is bulletproof: the
+# key + cert are never rewritten, so the CA — and every client cert signed by it — stays
+# valid across re-runs. To intentionally rotate: delete files/ca/ and re-run.
+- name: Does the CA already exist?
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../files/ca/client-ca.key"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: _ca_key
+- name: CA private key (created once, never regenerated)
+  community.crypto.openssl_privatekey:
+    path: "{{ playbook_dir }}/../files/ca/client-ca.key"
+    passphrase: "{{ vault_ca_passphrase }}"
+    size: 4096
+  when: not _ca_key.stat.exists
+  delegate_to: localhost
+  run_once: true
+  become: false
+  check_mode: false
+- name: CA CSR
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ playbook_dir }}/../files/ca/client-ca.key"
+    privatekey_passphrase: "{{ vault_ca_passphrase }}"
+    common_name: "{{ domain }} client CA"
+    basic_constraints: ['CA:TRUE']
+    basic_constraints_critical: true
+    key_usage: [keyCertSign]
+    key_usage_critical: true
+  register: ca_csr
+  delegate_to: localhost
+  run_once: true
+  become: false
+  check_mode: false
+- name: Self-signed CA cert (created once, alongside the key)
+  community.crypto.x509_certificate:
+    path: "{{ playbook_dir }}/../files/ca/client-ca.crt"
+    csr_content: "{{ ca_csr.csr }}"
+    privatekey_path: "{{ playbook_dir }}/../files/ca/client-ca.key"
+    privatekey_passphrase: "{{ vault_ca_passphrase }}"
+    provider: selfsigned
+  when: not _ca_key.stat.exists
+  delegate_to: localhost
+  run_once: true
+  become: false
+  check_mode: false
+
+# 2. Distribute the CA cert to the host (PgBouncer client_tls_ca_file for mTLS).
+- name: certs dirs on host
+  ansible.builtin.file: { path: "{{ app_dir }}/docker/certs/{{ item }}", state: directory, mode: "0755" }
+  loop: [ca, server]
+- name: Copy CA cert to host
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../files/ca/client-ca.crt"
+    dest: "{{ app_dir }}/docker/certs/ca/client-ca.crt"
+    mode: "0644"
+  notify: restart pgbouncer
+
+# 3. Public server cert for {{ domain }} via Let's Encrypt DNS-01 (Route 53).
+- name: certbot + route53 plugin
+  ansible.builtin.apt:
+    name: [certbot, python3-certbot-dns-route53]
+    state: present
+    update_cache: true
+# Persist the OVH host's AWS creds for root so BOTH the initial issuance AND the systemd
+# certbot.timer renewals (which run as root) can edit Route 53 unattended.
+- name: AWS creds dir
+  ansible.builtin.file: { path: /root/.aws, state: directory, mode: "0700" }
+- name: AWS creds for certbot (root)
+  ansible.builtin.copy:
+    dest: /root/.aws/credentials
+    mode: "0600"
+    content: |
+      [default]
+      aws_access_key_id = {{ vault_ovh_aws_access_key }}
+      aws_secret_access_key = {{ vault_ovh_aws_secret_key }}
+  no_log: true
+- name: Obtain LE cert (DNS-01)
+  ansible.builtin.command:
+    cmd: >
+      certbot certonly --dns-route53 -d {{ domain }}
+      --agree-tos -m {{ letsencrypt_email }} --non-interactive
+    creates: "/etc/letsencrypt/live/{{ domain }}/fullchain.pem"
+  environment:
+    AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
+- name: Install server cert/key where PgBouncer reads it
+  ansible.builtin.copy:
+    remote_src: true
+    src: "/etc/letsencrypt/live/{{ domain }}/{{ item.src }}"
+    dest: "{{ app_dir }}/docker/certs/server/{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: fullchain.pem, dest: server.crt, mode: "0644" }
+    - { src: privkey.pem,   dest: server.key, mode: "0640" }
+  notify: restart pgbouncer

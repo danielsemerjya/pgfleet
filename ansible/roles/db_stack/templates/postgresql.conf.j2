@@ -1,0 +1,31 @@
+# Managed by Ansible (db_stack role). Tuned for {{ pg_shared_buffers }} shared_buffers.
+listen_addresses = '*'
+
+max_connections = {{ pg_max_connections }}
+shared_buffers = {{ pg_shared_buffers }}
+effective_cache_size = {{ pg_effective_cache_size }}
+work_mem = {{ pg_work_mem }}
+maintenance_work_mem = {{ pg_maintenance_work_mem }}
+
+wal_level = replica
+wal_compression = on
+checkpoint_completion_target = 0.9
+max_wal_size = 4GB
+min_wal_size = 1GB
+
+# pgBackRest WAL archiving (stanza is created by the backups role)
+archive_mode = on
+archive_command = 'pgbackrest --stanza=main archive-push %p'
+
+random_page_cost = 1.1
+effective_io_concurrency = 200
+
+# TLS terminates at PgBouncer (Postgres is localhost-only behind it) → ssl off here.
+ssl = off
+password_encryption = scram-sha-256
+
+shared_preload_libraries = 'pg_stat_statements'
+pg_stat_statements.track = top
+log_min_duration_statement = 500ms
+log_checkpoints = on
+log_line_prefix = '%m [%p] %q%u@%d '

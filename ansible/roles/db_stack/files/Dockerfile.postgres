@@ -1,0 +1,11 @@
+# Postgres 16 + pgvector (base) + pgBackRest (in-container archive_command). Verified 2026.
+# Base image is PINNED (not :latest/:pg16 moving tag) for reproducibility. Overridable from
+# Ansible via pg_image_base (passed as the PG_IMAGE_BASE build-arg by docker-compose.yml.j2).
+ARG PG_IMAGE_BASE=pgvector/pgvector:0.8.2-pg16
+FROM ${PG_IMAGE_BASE}
+# ca-certificates: pgBackRest validates the S3 endpoint's TLS cert against the system
+# CA store; the base image omits it, so install it explicitly (not pulled as a recommend).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pgbackrest ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN install -d -o postgres -g postgres /var/spool/pgbackrest /var/log/pgbackrest

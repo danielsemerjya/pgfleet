@@ -1,0 +1,6 @@
+; Managed by Ansible (db_stack role). Plaintext entries are valid with scram auth_type —
+; PgBouncer derives the SCRAM verifier. Generated from projects + vault passwords.
+{% for p in projects %}
+"{{ p.name }}_app" "{{ vault_project_passwords[p.name] }}"
+{% endfor %}
+"pgbouncer_stats" "{{ vault_pgb_stats_password }}"

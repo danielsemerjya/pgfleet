@@ -1,0 +1,68 @@
+# Managed by Ansible (db_stack role) — do not edit on the host.
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+      args:
+        PG_IMAGE_BASE: "{{ pg_image_base }}"   # pinned base, single-sourced from vars.yml
+    image: db-server/postgres:16
+    pull_policy: build          # local image — build it, don't try to pull from a registry
+    restart: unless-stopped
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superpass
+    shm_size: "512mb"
+    stop_grace_period: 1m
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - pgbackrest_spool:/var/spool/pgbackrest
+      - ./secrets/postgres_superpass:/run/secrets/postgres_superpass:ro
+    ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0   # pinned — keep in sync with the UID-discovery task in db_stack/tasks/main.yml
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      - ./certs/server:/etc/pgbouncer/certs:ro
+      - ./certs/ca:/etc/pgbouncer/ca:ro
+    ports: ["6432:6432"]
+
+  postgres_exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.19.1
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATA_SOURCE_NAME: "postgresql://exporter:${EXPORTER_PASSWORD}@postgres:5432/postgres?sslmode=disable"
+
+  node_exporter:
+    image: quay.io/prometheus/node-exporter:v1.11.1
+    restart: unless-stopped
+    pid: host
+    volumes: ["/:/host:ro,rslave"]
+    command: ["--path.rootfs=/host"]
+
+  alloy:
+    image: grafana/alloy:v1.16.1
+    restart: unless-stopped
+    depends_on: [postgres_exporter, node_exporter]
+    env_file: ./alloy/.env.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+    command: ["run", "/etc/alloy/config.alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+
+volumes:
+  pgdata:
+  pgbackrest_spool:

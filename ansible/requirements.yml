@@ -1,0 +1,8 @@
+# Install with:  ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.docker
+    version: ">=5.2.0"        # provides docker_compose_v2
+  - name: community.crypto    # CA + client certs (ownca)
+  - name: community.general   # ufw, etc.
+  - name: ansible.posix
+  - name: community.aws       # secretsmanager_secret module (control-node); pulls amazon.aws. Needs boto3 in Ansible's Python
